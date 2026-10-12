@@ -133,7 +133,7 @@ docker compose up --build
 - Dashboard: http://localhost:3000
 - API and OpenAPI docs: http://localhost:8000/api/docs
 
-The `bootstrap` service creates the table in DynamoDB Local and loads real data: PIOMAS, NOAA ocean heat, the bundled rainfall history, and the months since from ClimateSERV. Allow about two minutes for the rainfall step.
+The `bootstrap` service creates the table in DynamoDB Local and loads real data: PIOMAS, NOAA ocean heat, the bundled rainfall history, and the months since from ClimateSERV. The Arctic data is ready in under a minute. The rainfall step fetches the months since the bundled history for all 64 boxes, one request at a time, and takes 30 to 45 minutes; the dashboard works throughout and boxes fill in as they arrive. If ClimateSERV drops some requests, run `docker compose run --rm bootstrap` again to pick up the rest.
 
 The agent is opt-in because it calls a paid model with your AWS credentials (well under a cent per run):
 

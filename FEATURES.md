@@ -57,7 +57,6 @@ Updated 12 October 2026. Every item on the previous to-do list is done; nothing 
 ## Not live yet
 
 - **AWS deployment:** nothing is deployed; the site runs only on this machine.
-- **Subregion rainfall history:** the 35-year download from ClimateSERV is still running; 31 of the 64 boxes are complete in the bundled file. Subregions without history show "No data yet".
 - **Subregion agent findings:** the agent has not been run since subregions were added, so no finding is tied to a subregion yet and subregions are scored on rainfall alone.
 - **Satellite energy imbalance:** NASA CERES, the record of energy in and out, needs an Earthdata login, so the chart uses the heat inventory instead.
 - **Food production for northern Australia:** no published grain figure was found for the Northern Territory or the Kimberley; both are entered as negligible.
