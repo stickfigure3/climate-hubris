@@ -3,22 +3,30 @@ export interface Point {
   volume: number;
 }
 
+export interface HeatPoint {
+  year: number;
+  value: number;
+}
+
 export interface Projection {
   valid: boolean;
   reason?: string;
   disclaimer: string;
   inputs: { baseline_year: number; rate_window: number; threshold: number; layer: "700" | "2000" };
   latest_year?: number;
+  rate_start_year?: number;
   volume_baseline?: number;
   volume_latest?: number;
   delta_volume?: number;
   delta_ohc?: number;
+  ohc_latest?: number;
   ohc_rate_zj_per_year?: number;
   sensitivity_km3_per_zj?: number;
   volume_rate_km3_per_year?: number;
   years_to_boe?: number;
   boe_year?: number;
   path?: Point[];
+  ohc_path?: HeatPoint[];
   trend: { slope_km3_per_year: number; intercept: number; zero_year: number | null; line: Point[] } | null;
 }
 
@@ -33,7 +41,13 @@ export interface ArcticData {
   } | null;
   monthly: { year: number; month: number; volume: number }[];
   annual_minima: Point[];
-  ohc: Record<"700" | "2000", { year: number; value: number }[]>;
+  ohc: Record<"700" | "2000", HeatPoint[]>;
+  energy_imbalance: {
+    unit: string;
+    window_years: number;
+    all_components_through: number | null;
+    series: HeatPoint[];
+  };
   projection: Projection;
   controls: {
     baseline_years: Record<"700" | "2000", number[]>;
@@ -70,10 +84,10 @@ export interface Finding {
   source_title: string;
 }
 
-export interface Region {
+/** Fields a region and a subregion share: both are scored the same way. */
+export interface Area {
   id: string;
   name: string;
-  hemisphere: "north" | "south";
   season_months: number[];
   geometry: { type: "Polygon"; coordinates: number[][][] };
   active: boolean;
@@ -86,6 +100,24 @@ export interface Region {
   findings: Finding[];
   history: { season: string; start_year: number; anomaly_pct: number }[];
   recent_months: { month: string; total_mm: number; normal_mm: number | null; complete: boolean }[];
+  /** Cereal production, million tonnes a year. */
+  food_mt: number;
+}
+
+export interface Region extends Area {
+  hemisphere: "north" | "south";
+  subregion_count: number;
+}
+
+export interface Subregion extends Area {
+  region: string;
+  region_name: string;
+  food_share_pct: number | null;
+  food_basis: string;
+}
+
+export interface RegionDetail extends Region {
+  subregions: Subregion[];
 }
 
 export interface MonsoonData {

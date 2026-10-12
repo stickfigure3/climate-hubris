@@ -6,7 +6,8 @@ Single-table design. Every item is addressed by (pk, sk):
     PIOMAS_MONTHLY     "1979"           values: 12 monthly volumes (10^3 km^3)
     PIOMAS_DAILY       "1979"           values: 365 daily volumes (10^3 km^3)
     OHC_700 / OHC_2000 "1955"           value, se (ZJ)
-    RAIN#<region>      "2025-06"        total_mm, days
+    HEAT_INVENTORY     "1971"           ocean, total (ZJ)
+    RAIN#<area>        "2025-06"        total_mm, days; area is a region or "<region>.<subregion>"
     FINDING#<region>   "<date>#<hash>"  one agent finding
     SEEN               "<hash>"         documents the agent already processed (TTL)
     IMD                "latest"         state-wise rainfall rows, when reachable

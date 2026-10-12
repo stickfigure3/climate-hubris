@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from .agent import run as agent
-from .ingest import climateserv, imd, ohc, piomas
+from .ingest import climateserv, eei, imd, ohc, piomas
 from .store import Store
 
 logging.getLogger().setLevel(logging.INFO)
@@ -13,13 +13,13 @@ log = logging.getLogger(__name__)
 
 
 def ingest_arctic(event, context) -> dict:
-    """Monthly: PIOMAS sea ice volume and NOAA ocean heat content."""
+    """Twice a month: PIOMAS sea ice volume, NOAA ocean heat content and Earth's heat inventory."""
     store = Store()
-    return {"piomas": piomas.ingest(store), "ohc": ohc.ingest(store)}
+    return {"piomas": piomas.ingest(store), "ohc": ohc.ingest(store), "energy_imbalance": eei.ingest(store)}
 
 
 def ingest_monsoon(event, context) -> dict:
-    """Weekly: regional rainfall, plus IMD state data when reachable."""
+    """Weekly: rainfall for every region and subregion, plus IMD state data when reachable."""
     store = Store()
     return {
         "rainfall": climateserv.ingest(

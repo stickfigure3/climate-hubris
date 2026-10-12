@@ -13,6 +13,7 @@
   /* Chart series */
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  --series-3: #1baf7a;
   --context: #c3c2b7;
   --wet: #2a78d6;
   --dry: #e34948;
@@ -41,6 +42,7 @@
     --wash: rgba(255, 255, 255, 0.05);
     --series-1: #3987e5;
     --series-2: #d95926;
+    --series-3: #199e70;
     --context: #52514e;
     --wet: #3987e5;
     --dry: #e66767;
@@ -616,6 +618,7 @@ td.nowrap {
 td.num,
 th.num {
   text-align: right;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
@@ -669,9 +672,41 @@ tbody tr.selected {
 }
 
 .map {
-  height: 360px;
+  height: 440px;
   width: 100%;
   background: var(--wash);
+}
+
+.map-frame {
+  position: relative;
+}
+
+.map-back {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 500;
+}
+
+.map-note {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 500;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.map-caption {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 
 .map-legend {
@@ -707,6 +742,34 @@ tbody tr.selected {
   cursor: pointer;
 }
 
+.leaflet-marker-icon.box-label {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  text-align: center;
+  line-height: 1.15;
+  color: var(--text);
+}
+
+.box-label div {
+  padding: 2px;
+  overflow-wrap: break-word;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.box-label b {
+  display: block;
+  font-weight: 600;
+}
+
+.box-label small {
+  display: block;
+  font-size: 0.92em;
+  color: var(--text-2);
+}
+
 .leaflet-tooltip.region-label::before {
   display: none;
 }
@@ -727,6 +790,31 @@ tbody tr.selected {
 }
 
 /* ---------- Region panel ---------- */
+
+.crumb {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.share {
+  display: block;
+  height: 4px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: var(--grid);
+}
+
+.share i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--text-2);
+}
+
+.subregions td,
+.subregions th {
+  padding: 7px 8px;
+}
 
 .region-panel h3 {
   font-size: 18px;

@@ -12,9 +12,9 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
-from . import arctic, boe, monsoon
+from . import arctic, boe, energy, food, monsoon
 from .config import settings
-from .regions import REGIONS
+from .regions import AREAS, REGIONS, SUBREGIONS
 from .store import Store
 
 app = FastAPI(
@@ -88,8 +88,10 @@ def arctic_summary() -> dict:
 
 @app.get("/api/arctic/projection")
 def arctic_projection(
-    baseline_year: int = Query(2000, ge=1979, le=2100),
-    rate_window: int = Query(10, ge=3, le=20),
+    baseline_year: int | None = Query(None, ge=1979, le=2100, description="Defaults to the oldest year on record."),
+    rate_window: int | None = Query(
+        None, ge=boe.RATE_WINDOW_MIN, le=boe.RATE_WINDOW_MAX, description="Defaults to the years since 2020."
+    ),
     layer: Literal["700", "2000"] = "700",
     threshold: float = Query(0.0, ge=0, le=2, description="Volume counted as ice-free, in 10^3 km^3."),
 ) -> dict:
@@ -104,11 +106,19 @@ def monsoon_overview() -> dict:
     return cached(f"monsoon:{today}", lambda: monsoon.overview(store(), today))
 
 
-@app.get("/api/monsoon/{region_id}")
-def monsoon_region(region_id: str) -> dict:
-    if region_id not in REGIONS:
-        raise HTTPException(404, f"Unknown region. Choose one of: {', '.join(REGIONS)}")
-    return next(r for r in monsoon_overview()["regions"] if r["id"] == region_id)
+@app.get("/api/monsoon/{area_id}")
+def monsoon_area(area_id: str) -> dict:
+    """A region with its subregions, or one subregion by its "<region>.<subregion>" id."""
+    today = _today()
+    if area_id in REGIONS:
+        return cached(f"monsoon:{today}:{area_id}", lambda: monsoon.region_detail(store(), REGIONS[area_id], today))
+    if area_id in SUBREGIONS:
+        return cached(
+            f"monsoon:{today}:{area_id}", lambda: monsoon.subregion_report(store(), SUBREGIONS[area_id], today)
+        )
+    raise HTTPException(
+        404, f"Unknown region. Choose one of: {', '.join(REGIONS)}, or a subregion id such as south_asia.pakistan"
+    )
 
 
 def _csv(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
@@ -125,27 +135,29 @@ def _csv(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
 
 @app.get("/api/export/arctic.csv")
 def export_arctic() -> Response:
-    """Monthly PIOMAS volume, with the annual minimum and ocean heat content repeated per year."""
+    """Monthly PIOMAS volume, with the annual minimum, ocean heat content and energy imbalance repeated per year."""
     s = store()
     monthly = arctic.load_monthly(s)
     minima = boe.annual_minima(monthly)
     ohc700, ohc2000 = arctic.load_ohc(s, "700"), arctic.load_ohc(s, "2000")
+    imbalance = {p["year"]: p["value"] for p in energy.summary(s)["series"]}
     rows = [
-        [y, m + 1, v, minima.get(y, ""), ohc700.get(y, ""), ohc2000.get(y, "")]
+        [y, m + 1, v, minima.get(y, ""), ohc700.get(y, ""), ohc2000.get(y, ""), imbalance.get(y, "")]
         for y, values in sorted(monthly.items())
         for m, v in enumerate(values)
         if v is not None
     ]
-    header = ["year", "month", "ice_volume_1000km3", "annual_min_volume_1000km3", "ohc_0_700m_zj", "ohc_0_2000m_zj"]
+    header = ["year", "month", "ice_volume_1000km3", "annual_min_volume_1000km3", "ohc_0_700m_zj", "ohc_0_2000m_zj",
+              "energy_imbalance_w_m2_5yr_mean"]
     return _csv("climate-hubris-arctic.csv", header, rows)
 
 
 @app.get("/api/export/monsoon.csv")
 def export_monsoon() -> Response:
-    """Monthly rainfall for every region with its 1991-2020 normal."""
+    """Monthly rainfall for every region and subregion with its 1991-2020 normal."""
     s = store()
     rows = []
-    for region in REGIONS.values():
+    for region in AREAS.values():
         stored = {i["sk"]: i for i in s.query(f"RAIN#{region.id}")}
         normals = monsoon.climatology(stored)
         for key, row in sorted(stored.items()):
@@ -160,10 +172,21 @@ def export_monsoon() -> Response:
 @app.get("/api/export/findings.csv")
 def export_findings() -> Response:
     s = store()
-    fields = ["region", "date", "date_basis", "category", "kind", "severity", "summary", "evidence_quote",
+    fields = ["region", "subregion", "date", "date_basis", "category", "kind", "severity", "summary", "evidence_quote",
               "source_org", "source_url", "extracted_at", "model"]
     rows = [[item.get(f, "") for f in fields] for region in REGIONS for item in s.query(f"FINDING#{region}")]
     return _csv("climate-hubris-monsoon-findings.csv", fields, rows)
+
+
+@app.get("/api/export/food.csv")
+def export_food() -> Response:
+    """The cereal production estimate behind each box on the map."""
+    rows = [
+        [sub.region, sub.id, sub.name, sub.food_mt, *sub.bbox, food.basis(sub.parts)]
+        for sub in SUBREGIONS.values()
+    ]
+    header = ["region", "subregion", "name", "cereals_million_tonnes_per_year", "west", "south", "east", "north", "basis"]
+    return _csv("climate-hubris-food-production.csv", header, rows)
 
 
 handler = Mangum(app, lifespan="off")

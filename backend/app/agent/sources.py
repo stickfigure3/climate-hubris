@@ -35,6 +35,7 @@ class Source:
     url: str
     kind: str  # "page" | "rss"
     region_hint: str | None = None
+    country: str | None = None  # ISO3, for sources about a single country
 
 
 def _giews(code: str, region: str) -> Source:
@@ -44,16 +45,18 @@ def _giews(code: str, region: str) -> Source:
         f"https://www.fao.org/giews/countrybrief/country.jsp?code={code}",
         "page",
         region,
+        code,
     )
 
 
 SOURCES: list[Source] = [
     # FAO GIEWS country briefs: rainfall and crop conditions, updated a few times a year.
-    *[_giews(c, "south_asia") for c in ("IND", "PAK", "BGD", "NPL")],
-    *[_giews(c, "east_asia") for c in ("CHN", "VNM")],
-    *[_giews(c, "west_africa") for c in ("NER", "MLI", "BFA", "NGA")],
-    *[_giews(c, "southern_africa") for c in ("ZWE", "MOZ", "ZMB", "MWI")],
-    *[_giews(c, "south_america") for c in ("BRA", "BOL")],
+    # One for every country that is, or contains, a subregion (Japan's has not been updated since 2016).
+    *[_giews(c, "south_asia") for c in ("IND", "PAK", "BGD", "NPL", "LKA")],
+    *[_giews(c, "east_asia") for c in ("CHN", "VNM", "KOR", "PRK")],
+    *[_giews(c, "west_africa") for c in ("NER", "MLI", "BFA", "NGA", "GHA", "CIV", "SEN", "GIN", "SLE", "BEN", "TGO", "TCD")],
+    *[_giews(c, "southern_africa") for c in ("ZWE", "MOZ", "ZMB", "MWI", "ZAF", "TZA", "MDG", "AGO")],
+    *[_giews(c, "south_america") for c in ("BRA", "BOL", "PRY")],
     # FEWS NET regional overviews.
     Source("fewsnet-west-africa", "FEWS NET", "https://fews.net/west-africa", "page", "west_africa"),
     Source("fewsnet-southern-africa", "FEWS NET", "https://fews.net/southern-africa", "page", "southern_africa"),
@@ -79,6 +82,7 @@ class Document:
     text: str
     region_hint: str | None
     published: date | None  # None when the page prints no date of its own
+    country: str | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -116,7 +120,7 @@ def _page(client: httpx.Client, source: Source) -> list[Document]:
             published = datetime.strptime(match.group(1), "%d-%B-%Y").date()
         except ValueError:
             pass
-    return [Document(source.id, source.org, source.url, title, text, source.region_hint, published)]
+    return [Document(source.id, source.org, source.url, title, text, source.region_hint, published, source.country)]
 
 
 def _rss(client: httpx.Client, source: Source, today: date) -> list[Document]:

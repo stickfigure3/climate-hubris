@@ -2,8 +2,8 @@
 
 A deliberately simple, first-order model: assume the loss of September sea ice
 volume since a baseline year scales linearly with the ocean heat gained over the
-same period, then run the recent heat uptake rate forward until the volume hits
-a threshold.
+same period, extend ocean heat forward in a straight line at its recent rate of
+increase, and read off when the ice that heat implies hits a threshold.
 
 Volumes are in 10^3 km^3 (PIOMAS convention); ocean heat content is in ZJ (10^21 J).
 """
@@ -16,6 +16,12 @@ DISCLAIMER = (
     "This is a first-order estimate based on a linear relationship. It does not account "
     "for non-linear feedbacks, albedo changes, or abrupt ice loss events."
 )
+
+# By default ocean heat is extended at its average rate of increase since this year,
+# and the dashboard lets that window be moved between these limits.
+RATE_FROM_YEAR = 2020
+RATE_WINDOW_MIN = 3
+RATE_WINDOW_MAX = 6
 
 # The seasonal minimum falls in September; a year only counts once the months
 # around it have been published.
@@ -47,20 +53,33 @@ def linear_fit(points: dict[int, float]) -> dict[str, float] | None:
     return {"slope": slope, "intercept": intercept}
 
 
+def default_rate_window(latest_year: int) -> int:
+    """Years back to RATE_FROM_YEAR, kept inside the limits the dashboard offers."""
+    return max(RATE_WINDOW_MIN, min(RATE_WINDOW_MAX, latest_year - RATE_FROM_YEAR))
+
+
 def project_boe(
     minima: dict[int, float],
     ohc: dict[int, float],
-    baseline_year: int = 2000,
-    rate_window: int = 10,
+    baseline_year: int | None = None,
+    rate_window: int | None = None,
     threshold: float = 0.0,
 ) -> dict[str, Any]:
     """Project the year the annual-minimum volume reaches `threshold`.
 
     sensitivity   = dV / dOHC                between baseline_year and the latest common year
     ohc_rate      = mean annual OHC increase over the last `rate_window` years
+    OHC(t)        = OHC_latest + ohc_rate * (t - latest)
+    V(t)          = V_latest + sensitivity * (OHC(t) - OHC_latest)
     years_to_boe  = (V_latest - threshold) / (|sensitivity| * ohc_rate)
+
+    The baseline defaults to the first year both records cover, and the rate
+    window to the years since RATE_FROM_YEAR.
     """
     common = sorted(set(minima) & set(ohc))
+    if common:
+        baseline_year = common[0] if baseline_year is None else baseline_year
+        rate_window = default_rate_window(common[-1]) if rate_window is None else rate_window
     result: dict[str, Any] = {
         "inputs": {
             "baseline_year": baseline_year,
@@ -87,6 +106,7 @@ def project_boe(
     ohc_rate = (ohc[latest] - ohc[rate_start]) / rate_window
     result.update(
         latest_year=latest,
+        rate_start_year=rate_start,
         volume_baseline=minima[baseline_year],
         volume_latest=minima[latest],
         ohc_baseline=ohc[baseline_year],
@@ -110,7 +130,7 @@ def project_boe(
     if remaining <= 0:
         return {**result, "valid": True, "years_to_boe": 0.0, "boe_year": float(latest),
                 "sensitivity_km3_per_zj": sensitivity * 1000,
-                "volume_rate_km3_per_year": volume_rate * 1000, "path": []}
+                "volume_rate_km3_per_year": volume_rate * 1000, "path": [], "ohc_path": []}
 
     years = remaining / -volume_rate
     boe_year = latest + years
@@ -118,6 +138,9 @@ def project_boe(
     for y in range(latest + 1, int(boe_year) + 1):
         path.append({"year": y, "volume": minima[latest] + volume_rate * (y - latest)})
     path.append({"year": round(boe_year, 2), "volume": threshold})
+    # The heat the ice path is read from: the same years, on the straight line.
+    ohc_path = [{"year": p["year"], "value": ohc[latest] + ohc_rate * (p["year"] - latest)} for p in path[:-1]]
+    ohc_path.append({"year": round(boe_year, 2), "value": ohc[latest] + ohc_rate * years})
 
     result.update(
         valid=True,
@@ -126,6 +149,7 @@ def project_boe(
         years_to_boe=years,
         boe_year=boe_year,
         path=path,
+        ohc_path=ohc_path,
     )
     return result
 

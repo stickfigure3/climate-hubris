@@ -46,6 +46,25 @@ def test_findings_without_a_verbatim_quote_are_dropped():
     assert rejected == 1
 
 
+def test_subregion_is_decided_by_code():
+    # A name the model gives is kept only if the region has that subregion.
+    assert extract.resolve_subregion("south_asia", "punjab_haryana", None) == "south_asia.punjab_haryana"
+    assert extract.resolve_subregion("south_asia", "south_asia.bangladesh", None) == "south_asia.bangladesh"
+    assert extract.resolve_subregion("south_asia", "henan", None) is None
+    assert extract.resolve_subregion("south_asia", "atlantis", "IND") is None
+    # A brief about one country counts towards the subregion that is that country.
+    assert extract.resolve_subregion("south_asia", None, "PAK") == "south_asia.pakistan"
+    assert extract.resolve_subregion("south_asia", None, "IND") is None  # India is eleven subregions
+    assert extract.resolve_subregion("east_asia", None, "KOR") == "east_asia.korea"
+
+    quote = "cumulative rainfall since June was 30 percent below the long-term mean"
+    kept, _ = extract.extract(FakeChain([_finding(quote, subregion="punjab_haryana")]), _doc(country="IND"))
+    assert kept[0].subregion == "south_asia.punjab_haryana"
+    kept, _ = extract.extract(FakeChain([_finding(quote, subregion="made_up")]), _doc(country="IND"))
+    assert kept[0].subregion is None
+    assert "punjab_haryana (Punjab & Haryana)" in extract.region_list()
+
+
 def test_findings_whose_evidence_is_off_topic_are_dropped():
     text = TEXT + " Wheat output is forecast to remain below average as rising costs discourage planting."
     off_topic = _finding("Wheat output is forecast to remain below average as rising costs discourage planting")

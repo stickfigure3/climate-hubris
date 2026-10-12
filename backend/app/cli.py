@@ -1,7 +1,7 @@
 """Local command line for the same jobs the Lambdas run.
 
     python -m app.cli init       create the table (DynamoDB Local)
-    python -m app.cli arctic     ingest PIOMAS + ocean heat content
+    python -m app.cli arctic     ingest PIOMAS, ocean heat content and Earth's heat inventory
     python -m app.cli rainfall   load the rainfall seed, then fetch newer months
     python -m app.cli imd        try the IMD state-wise API
     python -m app.cli agent      run the agent once (calls the LLM)
@@ -15,7 +15,7 @@ import logging
 import sys
 
 from .agent import run as agent
-from .ingest import climateserv, imd, ohc, piomas
+from .ingest import climateserv, eei, imd, ohc, piomas
 from .store import Store, create_table
 
 
@@ -34,7 +34,7 @@ def main(argv: list[str]) -> int:
             result = "table ready"
         elif command == "arctic":
             store = Store()
-            result = {"piomas": piomas.ingest(store), "ohc": ohc.ingest(store)}
+            result = {"piomas": piomas.ingest(store), "ohc": ohc.ingest(store), "energy_imbalance": eei.ingest(store)}
         elif command == "rainfall":
             result = climateserv.ingest(Store())
         elif command == "imd":

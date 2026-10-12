@@ -74,7 +74,9 @@ data() {
   aws lambda invoke --function-name climate-hubris-ingest-arctic --region "$REGION" \
     --cli-read-timeout 150 /dev/stdout
   echo
-  echo "==> Ingesting rainfall (loads the bundled history, then fetches recent months)"
+  echo "==> Ingesting rainfall (loads the bundled history, then fetches recent months;"
+  echo "    64 boxes may not fit in one run: if it reports complete: false, the weekly schedule"
+  echo "    or a second 'scripts/deploy.sh data' picks up where it stopped)"
   aws lambda invoke --function-name climate-hubris-ingest-monsoon --region "$REGION" \
     --cli-read-timeout 910 /dev/stdout
   echo

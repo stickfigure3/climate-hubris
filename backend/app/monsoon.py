@@ -1,4 +1,8 @@
-"""Monsoon stress scoring: rainfall anomaly against the 1991-2020 normal, combined with agent findings."""
+"""Monsoon stress scoring: rainfall anomaly against the 1991-2020 normal, combined with agent findings.
+
+Regions and their subregions are scored the same way; a subregion uses its own
+rainfall box and only the findings the agent tied to it.
+"""
 
 from __future__ import annotations
 
@@ -6,15 +10,19 @@ import calendar
 from datetime import date, timedelta
 from typing import Any
 
+from . import food
 from .ingest.climateserv import BASELINE, HISTORY_START
 from .regions import (
     OFF_SEASON_MONTHS,
     REGIONS,
     Region,
     Season,
+    Subregion,
     current_season,
     last_completed_season,
+    region_food_mt,
     season_starting,
+    subregions_of,
 )
 from .store import Store
 
@@ -92,7 +100,7 @@ def season_stats(rows: dict[str, dict], normals: dict[int, float], season: Seaso
     }
 
 
-def season_history(region: Region, rows: dict[str, dict], normals: dict[int, float], today: date) -> list[dict]:
+def season_history(region: Region | Subregion, rows: dict[str, dict], normals: dict[int, float], today: date) -> list[dict]:
     """Anomaly of every fully observed past season, oldest first."""
     out = []
     for start_year in range(HISTORY_START, today.year + 1):
@@ -106,9 +114,10 @@ def season_history(region: Region, rows: dict[str, dict], normals: dict[int, flo
 
 
 def _findings(store: Store, region: Region, since: date) -> list[dict]:
+    """A region's findings from `since` onwards, newest first."""
     items = store.query(f"FINDING#{region.id}", sk_from=since.isoformat())
     fields = ("date", "date_basis", "category", "kind", "severity", "summary", "evidence_quote",
-              "source_url", "source_org", "source_title", "extracted_at")
+              "source_url", "source_org", "source_title", "extracted_at", "subregion")
     return sorted(({k: i.get(k) for k in fields} for i in items), key=lambda f: f["date"], reverse=True)
 
 
@@ -117,21 +126,22 @@ def _observed_severity(findings: list[dict]) -> int | None:
     return max((f["severity"] for f in findings if f.get("kind") != "forecast"), default=None)
 
 
-def region_report(store: Store, region: Region, today: date) -> dict[str, Any]:
-    rows = {i["sk"]: i for i in store.query(f"RAIN#{region.id}")}
+def _report(store: Store, area: Region | Subregion, today: date, findings: list[dict]) -> dict[str, Any]:
+    """Season status, rainfall and score for one box. `findings` are the ones that count
+    towards it, reaching back to the start of its last completed season."""
+    rows = {i["sk"]: i for i in store.query(f"RAIN#{area.id}")}
     normals = climatology(rows)
-    active = current_season(region, today)
-    last = last_completed_season(region, today)
+    active = current_season(area, today)
+    last = last_completed_season(area, today)
 
     current = season_stats(rows, normals, active) if active else None
     last_stats = season_stats(rows, normals, last)
 
     # Findings count towards the season they were reported in.
-    last_findings = [
-        f for f in _findings(store, region, last.start)
-        if f["date"] <= (last.end + timedelta(days=AGENT_LOOKBACK_DAYS)).isoformat()
-    ]
-    recent = _findings(store, region, today - timedelta(days=AGENT_LOOKBACK_DAYS))
+    last_until = (last.end + timedelta(days=AGENT_LOOKBACK_DAYS)).isoformat()
+    last_findings = [f for f in findings if last.start.isoformat() <= f["date"] <= last_until]
+    recent_from = (today - timedelta(days=AGENT_LOOKBACK_DAYS)).isoformat()
+    recent = [f for f in findings if f["date"] >= recent_from]
     recent_severity = _observed_severity(recent)
 
     if active:
@@ -141,11 +151,10 @@ def region_report(store: Store, region: Region, today: date) -> dict[str, Any]:
 
     last_severity = _observed_severity(last_findings)
     return {
-        "id": region.id,
-        "name": region.name,
-        "hemisphere": region.hemisphere,
-        "season_months": list(region.months),
-        "geometry": region.polygon,
+        "id": area.id,
+        "name": area.name,
+        "season_months": list(area.months),
+        "geometry": area.polygon,
         "active": active is not None,
         "level": level,
         "rain_level": rain_level(current["anomaly_pct"]) if current else None,
@@ -159,7 +168,7 @@ def region_report(store: Store, region: Region, today: date) -> dict[str, Any]:
             "findings_count": len(last_findings),
         },
         "findings": recent if active else last_findings,
-        "history": season_history(region, rows, normals, today),
+        "history": season_history(area, rows, normals, today),
         "normals_mm": {str(m): round(v, 1) for m, v in sorted(normals.items())},
         "recent_months": [
             {
@@ -174,6 +183,46 @@ def region_report(store: Store, region: Region, today: date) -> dict[str, Any]:
     }
 
 
+def _region_findings(store: Store, region: Region, today: date) -> list[dict]:
+    return _findings(store, region, last_completed_season(region, today).start)
+
+
+def region_report(store: Store, region: Region, today: date, findings: list[dict] | None = None) -> dict[str, Any]:
+    findings = _region_findings(store, region, today) if findings is None else findings
+    subregions = subregions_of(region.id)
+    return {
+        **_report(store, region, today, findings),
+        "hemisphere": region.hemisphere,
+        "food_mt": region_food_mt(region.id),
+        "subregion_count": len(subregions),
+    }
+
+
+def subregion_report(store: Store, subregion: Subregion, today: date, findings: list[dict] | None = None) -> dict[str, Any]:
+    """`findings` are the parent region's; only those the agent tied to this subregion count."""
+    region = REGIONS[subregion.region]
+    findings = _region_findings(store, region, today) if findings is None else findings
+    total = region_food_mt(region.id)
+    return {
+        **_report(store, subregion, today, [f for f in findings if f.get("subregion") == subregion.id]),
+        "region": region.id,
+        "region_name": region.name,
+        "food_mt": subregion.food_mt,
+        "food_share_pct": round(subregion.food_mt / total * 100, 1) if total else None,
+        "food_basis": food.basis(subregion.parts),
+    }
+
+
+def region_detail(store: Store, region: Region, today: date) -> dict[str, Any]:
+    """A region with every subregion scored the same way, largest producer first."""
+    findings = _region_findings(store, region, today)
+    subregions = [subregion_report(store, s, today, findings) for s in subregions_of(region.id)]
+    return {
+        **region_report(store, region, today, findings),
+        "subregions": sorted(subregions, key=lambda s: s["food_mt"], reverse=True),
+    }
+
+
 def overview(store: Store, today: date) -> dict[str, Any]:
     regions = [region_report(store, r, today) for r in REGIONS.values()]
     any_active = any(r["active"] for r in regions)
@@ -182,5 +231,6 @@ def overview(store: Store, today: date) -> dict[str, Any]:
         "mode": "off_season" if today.month in OFF_SEASON_MONTHS or not any_active else "active",
         "active_regions": [r["id"] for r in regions if r["active"]],
         "baseline": f"{BASELINE[0]}–{BASELINE[1]}",
+        "food_unit": "million tonnes of cereals a year",
         "regions": regions,
     }

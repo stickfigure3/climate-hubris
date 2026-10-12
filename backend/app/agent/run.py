@@ -66,6 +66,7 @@ def run(store: Store, today: date | None = None, force: bool = False, chain=None
                 f"FINDING#{f.region}",
                 f"{finding_date}#{digest}",
                 region=f.region,
+                subregion=f.subregion,
                 category=f.category,
                 kind=f.kind,
                 severity=f.severity,

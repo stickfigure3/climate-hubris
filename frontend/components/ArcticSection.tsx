@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { API_URL, useApi } from "@/lib/api";
 import { formatDate, number, signed } from "@/lib/format";
 import type { ArcticData, Meta, Projection } from "@/lib/types";
 import { Freshness } from "./Freshness";
-import { Sparkline } from "./Sparkline";
+import { ImbalanceChart } from "./ImbalanceChart";
 import { VolumeChart } from "./VolumeChart";
 
 type Layer = "700" | "2000";
@@ -18,19 +18,30 @@ interface Assumptions {
   threshold: number;
 }
 
-const DEFAULTS: Assumptions = { baseline: 2000, window: 10, layer: "700", threshold: 0 };
-
 export function ArcticSection({ meta }: { meta: Meta | null }) {
   const arctic = useApi<ArcticData>("/api/arctic");
-  const [assumptions, setAssumptions] = useState<Assumptions>(DEFAULTS);
+  // The defaults come with the data: sensitivity since the first year on record, heat uptake since 2020.
+  const inputs = arctic.data?.projection.inputs;
+  const defaults = useMemo<Assumptions>(
+    () => ({
+      baseline: inputs?.baseline_year ?? 1979,
+      window: inputs?.rate_window ?? 5,
+      layer: inputs?.layer ?? "700",
+      threshold: inputs?.threshold ?? 0,
+    }),
+    [inputs?.baseline_year, inputs?.rate_window, inputs?.layer, inputs?.threshold],
+  );
+  const [changed, setAssumptions] = useState<Assumptions | null>(null);
+  const assumptions = changed ?? defaults;
   // Sliders fire continuously; ask the API only once the value settles.
-  const [settled, setSettled] = useState<Assumptions>(DEFAULTS);
+  const [settledChange, setSettled] = useState<Assumptions | null>(null);
   useEffect(() => {
-    const timer = setTimeout(() => setSettled(assumptions), 250);
+    const timer = setTimeout(() => setSettled(changed), 250);
     return () => clearTimeout(timer);
-  }, [assumptions]);
+  }, [changed]);
+  const settled = settledChange ?? defaults;
 
-  const isDefault = JSON.stringify(settled) === JSON.stringify(DEFAULTS);
+  const isDefault = JSON.stringify(settled) === JSON.stringify(defaults);
   const custom = useApi<Projection>(
     isDefault
       ? null
@@ -61,14 +72,17 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
   const data = arctic.data;
   const projection = isDefault ? data.projection : (custom.data ?? data.projection);
   const comparison = data.comparison;
-  const ohc = data.ohc["700"];
+  const imbalance = data.energy_imbalance;
   const baselineYears = data.controls.baseline_years[assumptions.layer];
-  const update = (patch: Partial<Assumptions>) => setAssumptions((a) => ({ ...a, ...patch }));
+  const update = (patch: Partial<Assumptions>) => setAssumptions({ ...assumptions, ...patch });
+  const referenceYear = comparison ? Number(comparison.reference_date.slice(0, 4)) : null;
+  const rateStart = (projection.latest_year ?? 0) - assumptions.window;
 
   function setLayer(layer: Layer) {
     const years = data.controls.baseline_years[layer];
-    const baseline = years.includes(assumptions.baseline) ? assumptions.baseline : years[0];
-    // The 0-2000 m record starts in 2005, so earlier baselines fall back to its first year.
+    // "As far back as the data goes" follows the layer: 1979 for 0-700 m, 2005 for 0-2000 m.
+    const oldest = assumptions.baseline === baselineYears[0];
+    const baseline = !oldest && years.includes(assumptions.baseline) ? assumptions.baseline : years[0];
     update({ layer, baseline });
   }
 
@@ -78,8 +92,8 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
         <div>
           <h2>Arctic sea ice</h2>
           <p>
-            How much ice is left compared with the year 2000, and when a simple ocean-heat model says the September
-            minimum reaches zero: a Blue Ocean Event.
+            How much ice is left compared with {referenceYear ?? "the first year on record"}, and when the heat the
+            ocean keeps gaining says the September minimum reaches zero: a Blue Ocean Event.
           </p>
         </div>
         <a className="button" href={`${API_URL}/api/export/arctic.csv`} download>
@@ -111,6 +125,9 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
                   </div>
                 </div>
               </div>
+              <p className="note" style={{ margin: "0 0 12px" }}>
+                {referenceYear} is the oldest year in the PIOMAS record.
+              </p>
               <div className="delta-row">
                 <span>
                   <strong>
@@ -139,7 +156,8 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
                 <small>in about {Math.round(projection.years_to_boe ?? 0)} years</small>
               </div>
               <p className="note">
-                First-order estimate from ocean heat uptake.{" "}
+                First-order estimate from ocean heat extended at its {projection.rate_start_year}–
+                {projection.latest_year} rate.{" "}
                 {projection.trend?.zero_year
                   ? `A straight line through the September minima reaches zero in ${Math.round(projection.trend.zero_year)}.`
                   : ""}
@@ -152,13 +170,17 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
         </div>
 
         <div className="card">
-          <h3>Global ocean heat content, 0–700 m</h3>
-          <Sparkline
-            points={ohc}
-            label="Ocean heat content anomaly in zettajoules"
-            format={(v) => `${signed(v, 0)} ZJ vs 1955–2006 mean`}
+          <h3>Earth&rsquo;s energy imbalance, W/m²</h3>
+          <ImbalanceChart
+            points={imbalance.series}
+            windowYears={imbalance.window_years}
+            measuredThrough={imbalance.all_components_through}
           />
-          <Freshness meta={meta} dataset="ohc_700" staleAfterDays={640} label="Annual mean through" />
+          <p className="note">
+            Energy absorbed minus energy radiated back to space, from the heat the planet has accumulated. Above zero
+            means it is still warming.
+          </p>
+          <Freshness meta={meta} dataset="energy_imbalance" staleAfterDays={640} label="Heat inventory through" />
         </div>
       </div>
 
@@ -172,16 +194,22 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
       <div className="grid chart-and-controls">
         <div className="card">
           <div className="card-title-row">
-            <h3>Sea ice volume, 1979 to present, and the path to zero</h3>
+            <h3>Sea ice volume and ocean heat content, 1979 to present, and the path to zero</h3>
           </div>
-          <VolumeChart monthly={data.monthly} minima={data.annual_minima} projection={projection} />
+          <VolumeChart
+            monthly={data.monthly}
+            minima={data.annual_minima}
+            ohc={data.ohc[projection.inputs.layer]}
+            projection={projection}
+          />
+          <Freshness meta={meta} dataset={`ohc_${projection.inputs.layer}`} staleAfterDays={640} label="Ocean heat, annual mean through" />
         </div>
 
         <div className="card">
           <div className="card-title-row" style={{ marginBottom: 12 }}>
             <h3>Projection assumptions</h3>
             {isDefault ? null : (
-              <button className="link-button" onClick={() => setAssumptions(DEFAULTS)}>
+              <button className="link-button" onClick={() => setAssumptions(null)}>
                 Reset
               </button>
             )}
@@ -199,8 +227,10 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
             </div>
             <div className="control">
               <label htmlFor="window">
-                Heat uptake averaged over
-                <output>last {assumptions.window} years</output>
+                Heat uptake rate since
+                <output>
+                  {rateStart > 0 ? `${rateStart} · ` : ""}last {assumptions.window} years
+                </output>
               </label>
               <input
                 id="window"
@@ -241,7 +271,7 @@ export function ArcticSection({ meta }: { meta: Meta | null }) {
               <dl className="model-facts">
                 <dt>Ice lost per ZJ of ocean heat</dt>
                 <dd>{number(Math.abs(projection.sensitivity_km3_per_zj ?? 0), 1)} km³</dd>
-                <dt>Ocean heat gained per year</dt>
+                <dt>Ocean heat gained per year, projected</dt>
                 <dd>{number(projection.ohc_rate_zj_per_year ?? 0, 1)} ZJ</dd>
                 <dt>Implied ice loss per year</dt>
                 <dd>{number(Math.abs(projection.volume_rate_km3_per_year ?? 0))} km³</dd>

@@ -1,8 +1,8 @@
-"""Regional rainfall from ClimateSERV (NASA SERVIR), using the CHIRPS dataset.
+"""Rainfall from ClimateSERV (NASA SERVIR), using the CHIRPS dataset.
 
 ClimateSERV is asynchronous: submit a request, poll its progress, then fetch the
-result. We ask for the daily area-average rainfall over a region's polygon and
-store it as monthly totals.
+result. We ask for the daily area-average rainfall over the box of each region
+and subregion and store it as monthly totals.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import calendar
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
@@ -18,7 +19,7 @@ from typing import Callable
 import httpx
 
 from ..config import settings
-from ..regions import REGIONS, Region
+from ..regions import AREAS, Region, Subregion
 from ..store import Store
 
 log = logging.getLogger(__name__)
@@ -31,9 +32,11 @@ AVERAGE = 5  # operation type: spatial average
 # First year of the record we keep. 1991-2020 is the WMO standard normal period.
 HISTORY_START = 1991
 BASELINE = (1991, 2020)
-# ClimateSERV takes ~25 s per year of daily data for these polygons and fails outright on
-# 30-year requests, so history is fetched in pieces.
+# ClimateSERV takes ~25 s per year of daily data for a region's box (~5 s for a subregion's)
+# and fails outright on 30-year requests, so history is fetched in pieces.
 CHUNK_YEARS = 5
+# Requests in flight at once. ClimateSERV queues more than this rather than running them.
+WORKERS = 4
 
 
 class ClimateServError(RuntimeError):
@@ -41,9 +44,9 @@ class ClimateServError(RuntimeError):
 
 
 def fetch_daily(
-    client: httpx.Client, region: Region, start: date, end: date, timeout_s: float = 300
+    client: httpx.Client, region: Region | Subregion, start: date, end: date, timeout_s: float = 300
 ) -> list[tuple[date, float]]:
-    """Daily area-average rainfall (mm) for a region. Days without data are omitted."""
+    """Daily area-average rainfall (mm) over a box. Days without data are omitted."""
     params = {
         "datatype": CHIRPS,
         "begintime": start.strftime("%m/%d/%Y"),
@@ -94,19 +97,19 @@ def to_monthly(daily: list[tuple[date, float]]) -> dict[str, dict]:
 
 
 def load_seed(store: Store, path: Path = SEED_PATH) -> int:
-    """Write the bundled rainfall history into any region that has none stored yet."""
+    """Write the bundled rainfall history into any region or subregion that has none stored yet."""
     if not path.exists():
         return 0
     seed = json.loads(path.read_text())["regions"]
     written = 0
     for region_id, months in seed.items():
-        if region_id in REGIONS and not store.query(f"RAIN#{region_id}"):
+        if region_id in AREAS and not store.query(f"RAIN#{region_id}"):
             store.put_many(f"RAIN#{region_id}", months)
             written += len(months)
     return written
 
 
-def _next_start(store: Store, region: Region) -> date:
+def _next_start(store: Store, region: Region | Subregion) -> date:
     """Resume after the last fully observed month already stored."""
     complete = [i["sk"] for i in store.query(f"RAIN#{region.id}") if i.get("complete")]
     if not complete:
@@ -115,53 +118,80 @@ def _next_start(store: Store, region: Region) -> date:
     return date(year + (month == 12), month % 12 + 1, 1)
 
 
+def _fetch_since(
+    client: httpx.Client, area: Region | Subregion, start: date, today: date, seconds_left: Callable[[], float]
+) -> tuple[dict[str, dict], bool, str | None]:
+    """Months from `start` to today, in CHUNK_YEARS pieces: (months, finished, error)."""
+    months: dict[str, dict] = {}
+    while start <= today:
+        if seconds_left() < 330:
+            return months, False, None
+        end = min(date(start.year + CHUNK_YEARS - 1, 12, 31), today)
+        try:
+            months.update(to_monthly(fetch_daily(client, area, start, end)))
+        except (ClimateServError, httpx.HTTPError, ValueError, KeyError) as exc:
+            return months, False, f"{exc.__class__.__name__}: {exc}"
+        start = end + timedelta(days=1)
+    return months, True, None
+
+
 def ingest(
     store: Store,
     client: httpx.Client | None = None,
     today: date | None = None,
     seconds_left: Callable[[], float] | None = None,
 ) -> dict:
-    """Bring every region up to date.
+    """Bring every region and subregion up to date.
 
     History before the current year normally comes from the bundled seed file
-    (see load_seed). Anything missing is fetched in CHUNK_YEARS pieces; the run
-    stops early if time is running out and reports `complete: False`, and the
-    next run resumes where this one stopped.
+    (see load_seed). Anything missing is fetched in CHUNK_YEARS pieces, a few
+    boxes at a time; the run stops early if time is running out and reports
+    `complete: False`, and the next run resumes where this one stopped. One box
+    failing does not stop the others.
     """
     client = client or httpx.Client(
         headers={"User-Agent": settings.user_agent}, timeout=120, follow_redirects=True
     )
     today = today or date.today()
     seconds_left = seconds_left or (lambda: float("inf"))
-    summary: dict = {"regions": {}, "complete": True, "seeded_months": load_seed(store)}
+    summary: dict = {"regions": {}, "complete": True, "seeded_months": load_seed(store), "errors": 0}
     latest_overall: str | None = None
 
-    for region in REGIONS.values():
-        start = _next_start(store, region)
-        written = 0
-        while start <= today:
-            if seconds_left() < 330:
-                summary["complete"] = False
-                break
-            end = min(date(start.year + CHUNK_YEARS - 1, 12, 31), today)
-            months = to_monthly(fetch_daily(client, region, start, end))
+    # Fetching is the slow part and runs on threads; the table is only touched from this one.
+    starts = {area.id: _next_start(store, area) for area in AREAS.values()}
+    # Furthest behind first, so a run that is cut short still helps the boxes that need it most.
+    queue = sorted(AREAS.values(), key=lambda area: starts[area.id])
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        fetches = {
+            area.id: pool.submit(_fetch_since, client, area, starts[area.id], today, seconds_left)
+            for area in queue
+        }
+        for area_id, fetch in fetches.items():
+            months, finished, error = fetch.result()
             if months:
-                store.put_many(f"RAIN#{region.id}", months)
-                written += len(months)
-            start = end + timedelta(days=1)
+                store.put_many(f"RAIN#{area_id}", months)
+            if not finished:
+                summary["complete"] = False
+            if error:
+                summary["errors"] += 1
+                log.warning("rainfall %s failed: %s", area_id, error)
 
-        stored = store.query(f"RAIN#{region.id}")
-        latest = stored[-1]["sk"] if stored else None
-        summary["regions"][region.id] = {"months_written": written, "latest": latest}
-        if latest and (latest_overall is None or latest < latest_overall):
-            latest_overall = latest
-        log.info("rainfall %s: wrote %d months, latest %s", region.id, written, latest)
+            stored = store.query(f"RAIN#{area_id}")
+            latest = stored[-1]["sk"] if stored else None
+            summary["regions"][area_id] = {"months_written": len(months), "latest": latest}
+            if error:
+                summary["regions"][area_id]["error"] = error
+            if latest and (latest_overall is None or latest < latest_overall):
+                latest_overall = latest
+            log.info("rainfall %s: wrote %d months, latest %s", area_id, len(months), latest)
 
     store.put_meta(
         "monsoon_rainfall",
         source="CHIRPS via ClimateSERV (NASA SERVIR)",
         source_url="https://climateserv.servirglobal.net",
         latest_data=latest_overall,
+        areas=len(AREAS),
+        areas_failed=summary["errors"],
         status="ok" if summary["complete"] else "backfilling",
     )
     return summary

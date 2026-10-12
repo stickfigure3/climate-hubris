@@ -22,8 +22,8 @@ services:
     ports:
       - "8001:8000"
 
-  # Creates the table and loads real data: PIOMAS, NOAA ocean heat content, the
-  # bundled rainfall history, and the months since from ClimateSERV (~2 minutes).
+  # Creates the table and loads real data: PIOMAS, NOAA ocean heat content, the heat
+  # inventory, the bundled rainfall history, and the months since from ClimateSERV.
   bootstrap:
     <<: *backend
     entrypoint: ["python", "-m", "app.cli", "bootstrap"]

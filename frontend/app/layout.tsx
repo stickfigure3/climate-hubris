@@ -6,7 +6,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Climate Hubris: Arctic sea ice and global monsoons",
   description:
-    "Arctic sea ice volume against the year 2000, a first-order Blue Ocean Event projection, and an agent-assisted monitor of the world's monsoons.",
+    "Arctic sea ice volume against the first year on record, a first-order Blue Ocean Event projection from ocean heat, and an agent-assisted monitor of the world's monsoons and the food grown under them.",
 };
 
 const REPO_URL = process.env.NEXT_PUBLIC_REPO_URL;
@@ -32,9 +32,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <footer className="site-footer">
           <div className="wrap">
             <p>
-              Data: PIOMAS (Polar Science Center, University of Washington), NOAA NCEI ocean heat content, CHIRPS
-              rainfall via ClimateSERV (NASA SERVIR), and bulletins from FAO GIEWS, FEWS NET, UN News, FloodList,
-              NASA Earth Observatory and GDACS. Map outlines: Natural Earth.
+              Data: PIOMAS (Polar Science Center, University of Washington), NOAA NCEI ocean heat content, the
+              Indicators of Global Climate Change heat inventory, CHIRPS rainfall via ClimateSERV (NASA SERVIR),
+              cereal production from the World Bank and FAO with national statistics for India, China, Brazil and
+              Australia, and bulletins from FAO GIEWS, FEWS NET, UN News, FloodList, NASA Earth Observatory and
+              GDACS. Map outlines: Natural Earth.
             </p>
             <p>
               Built by <a href="https://akash.ucsciba.org">Akash Malampati</a>. Not an official forecast.{" "}

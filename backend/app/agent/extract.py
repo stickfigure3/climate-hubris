@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..regions import REGIONS
+from ..regions import REGIONS, SUBREGIONS, subregions_of
 from .sources import KEYWORDS, Document
 
 RegionId = Literal[
@@ -23,6 +23,12 @@ MIN_QUOTE_CHARS = 25
 
 class Finding(BaseModel):
     region: RegionId = Field(description="The monsoon region the statement is about.")
+    subregion: str | None = Field(
+        default=None,
+        description="The subregion id from the list, only if the quoted statement is about that country, "
+        "state or province specifically. Leave empty for statements about the region or a whole "
+        "multi-subregion country.",
+    )
     category: Category
     kind: Literal["observed", "forecast"] = Field(
         description="observed = the text reports it has happened or is happening; forecast = the text expects it."
@@ -55,6 +61,8 @@ Rules:
 text does not state.
 - Every finding needs an evidence_quote copied exactly from the document. Findings whose quote is not \
 found in the document are discarded automatically.
+- Each region lists its subregions as id (name). Set subregion only when the evidence_quote itself is \
+about that place; a statement about all of India, China or Brazil has no subregion.
 - Skip statements about other regions and about events unrelated to seasonal rainfall (earthquakes, \
 cyclones outside the monsoon, conflict).
 - Set kind to "forecast" when the document predicts or expects the condition, and "observed" when it \
@@ -127,11 +135,37 @@ def _date_is_supported(iso: str | None, text: str) -> bool:
     return iso[:4] in text
 
 
+def region_list() -> str:
+    """The regions and their subregions, as the prompt presents them."""
+    lines = []
+    for region in REGIONS.values():
+        subregions = ", ".join(f"{s.id.split('.')[1]} ({s.name})" for s in subregions_of(region.id))
+        lines.append(f"- {region.id}: {region.name} monsoon. Subregions: {subregions}")
+    return "\n".join(lines)
+
+
+def resolve_subregion(region: str, named: str | None, country: str | None) -> str | None:
+    """The subregion id a finding belongs to, decided by code rather than trusted from the model.
+
+    A name the model gives is kept only if it is one of the region's subregions. Otherwise a
+    source about a single country counts towards the one subregion that is that country.
+    """
+    if named:
+        candidate = named if "." in named else f"{region}.{named}"
+        if candidate in SUBREGIONS and SUBREGIONS[candidate].region == region:
+            return candidate
+    if country:
+        whole = [s.id for s in subregions_of(region) if s.parts.get(country) == ()]
+        if len(whole) == 1:
+            return whole[0]
+    return None
+
+
 def extract(chain, doc: Document) -> tuple[list[Finding], int]:
     """Run the model on one document. Returns (verified findings, number rejected)."""
     result: Extraction = chain.invoke(
         {
-            "regions": "\n".join(f"- {r.id}: {r.name} monsoon" for r in REGIONS.values()),
+            "regions": region_list(),
             "org": doc.org,
             "title": doc.title,
             "region_hint": doc.region_hint or "none",
@@ -145,5 +179,6 @@ def extract(chain, doc: Document) -> tuple[list[Finding], int]:
             continue
         if not _date_is_supported(finding.document_date, doc.text):
             finding.document_date = None
+        finding.subregion = resolve_subregion(finding.region, finding.subregion, doc.country)
         kept.append(finding)
     return kept, rejected
