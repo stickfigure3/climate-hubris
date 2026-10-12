@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Climate Hubris: FastAPI on Lambda (container image) behind an HTTP API, scheduled
+  ingestion Lambdas, DynamoDB, Amplify Hosting for the static frontend, and cost alarms.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: ECR image URI for the backend (built and pushed by scripts/deploy.sh).
+  SiteDomain:
+    Type: String
+    Default: climate.akash.ucsciba.org
+    Description: Public hostname of the frontend; used for CORS.
+  AlertEmail:
+    Type: String
+    Description: Address that receives cost and job-failure alerts.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 15
+    Description: Monthly cost cap in USD. Alarms fire as the account approaches or passes it.
+  LlmProvider:
+    Type: String
+    Default: bedrock
+    AllowedValues: [bedrock, openai]
+  BedrockModel:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: Bedrock model or inference profile id used by the agent.
+  ReliefWebAppName:
+    Type: String
+    Default: ""
+    Description: Approved ReliefWeb API appname. Leave empty to skip ReliefWeb.
+
+Globals:
+  Function:
+    PackageType: Image
+    Architectures: [arm64]
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Table
+        CORS_ORIGINS: !Sub "https://${SiteDomain},http://localhost:3000"
+        LLM_PROVIDER: !Ref LlmProvider
+        BEDROCK_MODEL: !Ref BedrockModel
+        RELIEFWEB_APPNAME: !Ref ReliefWebAppName
+
+Resources:
+  # ---------------------------------------------------------------- storage
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: climate-hubris
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # -------------------------------------------------------------------- api
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub "https://${SiteDomain}"
+          - http://localhost:3000
+        AllowMethods: [GET]
+        MaxAge: 3600
+      # A public, unauthenticated API: throttle it so a traffic spike cannot run up a bill.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: climate-hubris-api
+      ImageUri: !Ref ImageUri
+      Timeout: 20
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref Table
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+
+  # --------------------------------------------------------- scheduled jobs
+  ArcticIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: climate-hubris-ingest-arctic
+      ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: [app.handlers.ingest_arctic]
+      Timeout: 120
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+      Events:
+        # PIOMAS appears in the first days of each month on no fixed date, so check twice.
+        Monthly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 6 5,20 * ? *)
+
+  MonsoonIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: climate-hubris-ingest-monsoon
+      ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: [app.handlers.ingest_monsoon]
+      Timeout: 900
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+      Events:
+        Weekly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 5 ? * MON *)
+
+  AgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: climate-hubris-agent
+      ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: [app.handlers.run_agent]
+      Timeout: 600
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/*
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/climate-hubris/*
+      Events:
+        # Fires weekly; the handler itself drops to twice a month when no monsoon is active.
+        Weekly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 7 ? * MON *)
+
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/climate-hubris-api
+      RetentionInDays: 14
+  ArcticIngestLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/climate-hubris-ingest-arctic
+      RetentionInDays: 30
+  MonsoonIngestLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/climate-hubris-ingest-monsoon
+      RetentionInDays: 30
+  AgentLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/climate-hubris-agent
+      RetentionInDays: 30
+
+  # --------------------------------------------------------------- frontend
+  # Matches the existing akash.ucsciba.org site: Amplify Hosting with manual
+  # (zip upload) deployments. The custom domain is attached by scripts/deploy.sh.
+  Site:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: climate-hubris
+      Platform: WEB
+      CustomRules:
+        - Source: /<*>
+          Target: /404.html
+          Status: "404"
+
+  SiteBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt Site.AppId
+      BranchName: main
+      Stage: PRODUCTION
+
+  # ----------------------------------------------------- alerts and budget
+  Alerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: climate-hubris-alerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # Account-wide estimated charges. Needs "Receive CloudWatch billing alerts"
+  # switched on in the Billing console; until then it stays in INSUFFICIENT_DATA.
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: climate-hubris-billing
+      AlarmDescription: !Sub "Estimated AWS charges this month exceed $${MonthlyBudgetUsd}."
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - { Name: Currency, Value: USD }
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: !Ref MonthlyBudgetUsd
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref Alerts]
+
+  # Works without the billing-alerts preference, and warns before the cap is reached.
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: climate-hubris-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+
+  IngestErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: climate-hubris-job-errors
+      AlarmDescription: A scheduled ingestion or agent run failed.
+      Metrics:
+        - Id: total
+          Expression: arctic + monsoon + agent
+          Label: Failed scheduled runs
+        - Id: arctic
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions: [{ Name: FunctionName, Value: !Ref ArcticIngestFunction }]
+            Period: 3600
+            Stat: Sum
+        - Id: monsoon
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions: [{ Name: FunctionName, Value: !Ref MonsoonIngestFunction }]
+            Period: 3600
+            Stat: Sum
+        - Id: agent
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions: [{ Name: FunctionName, Value: !Ref AgentFunction }]
+            Period: 3600
+            Stat: Sum
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref Alerts]
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  AmplifyAppId:
+    Value: !GetAtt Site.AppId
+  AmplifyDefaultDomain:
+    Value: !GetAtt Site.DefaultDomain
+  TableName:
+    Value: !Ref Table

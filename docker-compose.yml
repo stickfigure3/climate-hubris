@@ -1,0 +1,75 @@
+# Local development: the same backend image that runs on Lambda, DynamoDB Local
+# in place of DynamoDB, and the Next.js dev server.
+#
+#   docker compose up --build         dashboard at http://localhost:3000
+#   docker compose run --rm agent     run the LLM agent once (needs AWS credentials)
+
+x-backend: &backend
+  build: ./backend
+  working_dir: /var/task
+  environment: &backend-env
+    TABLE_NAME: climate-hubris
+    DYNAMODB_ENDPOINT: http://dynamodb:8000
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: local
+    AWS_SECRET_ACCESS_KEY: local
+    CORS_ORIGINS: http://localhost:3000
+
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:2.5.4
+    command: -jar DynamoDBLocal.jar -sharedDb -inMemory
+    ports:
+      - "8001:8000"
+
+  # Creates the table and loads real data: PIOMAS, NOAA ocean heat content, the
+  # bundled rainfall history, and the months since from ClimateSERV (~2 minutes).
+  bootstrap:
+    <<: *backend
+    entrypoint: ["python", "-m", "app.cli", "bootstrap"]
+    depends_on:
+      - dynamodb
+
+  api:
+    <<: *backend
+    entrypoint: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      - dynamodb
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next:/app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  # Opt-in: calls Amazon Bedrock with your AWS credentials (a fraction of a cent per run).
+  agent:
+    <<: *backend
+    profiles: ["agent"]
+    entrypoint: ["python", "-m", "app.cli", "agent"]
+    environment:
+      TABLE_NAME: climate-hubris
+      DYNAMODB_ENDPOINT: http://dynamodb:8000
+      AWS_REGION: us-east-1
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      BEDROCK_MODEL: ${BEDROCK_MODEL:-}
+    volumes:
+      - ~/.aws:/root/.aws:ro
+    depends_on:
+      - dynamodb
+
+volumes:
+  frontend_node_modules:
+  frontend_next:
